@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
@@ -113,8 +113,9 @@ def read_post_list(db: Session = Depends(get_db)) -> list:
 def read_post(post_id: int, db: Session = Depends(get_db)) -> dict:
     post = db.query(Post).filter(Post.id == post_id).first()
     
-    if not post:
-        return {"message": "게시글을 찾을 수 없습니다."}
+    # 예외처리
+    if post is None:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
 
     return {
         "id": post_id,
@@ -133,8 +134,9 @@ async def update_post(post_id: int, updated_post: PostBase
     
     post = db.query(Post).filter(Post.id == post_id).first()
 
-    if not post:
-        return {"message": "게시글을 찾을 수 없습니다."}
+    # 예외처리
+    if post is None:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
     
     post.title = updated_post.title
     post.content = updated_post.content
@@ -164,8 +166,9 @@ async def update_post(post_id: int, updated_post: PostBase
 def delete_post(post_id: int, db: Session = Depends(get_db)) -> dict:
     post = db.query(Post).filter(Post.id == post_id).first()
     
-    if not post:
-        return {"message": "게시글을 찾을 수 없습니다."}
+    # 예외처리
+    if post is None:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
     
     db.delete(post) # delete()는 세션에서 객체를 삭제하는 메서드
     db.commit()
@@ -181,8 +184,9 @@ def delete_post(post_id: int, db: Session = Depends(get_db)) -> dict:
 async def generate_summary(post_id: int, db: Session = Depends(get_db)):
     post = db.query(Post).filter(Post.id == post_id).first()
 
-    if not post:
-        return {"message": "게시글을 찾을 수 없습니다."}
+    # 예외처리
+    if post is None:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
     
     # request_ai_summary에서 비동기 http 요청을 보내므로 await 키워드 사용
     summary = await request_ai_summary(post.title, post.content) # 여기가 이벤트 루프에서 블로킹되지 않도록 비동기 함수로 구현되어야 함
@@ -226,12 +230,24 @@ async def request_ai_summary(title: str, content: str) -> str:
         "stream": False
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(OLLAMA_URL, json=payload)
-        response.raise_for_status()  # 요청 실패 시 예외 발생
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(OLLAMA_URL, json=payload)
+            response.raise_for_status()  # 요청 실패 시 예외 발생
 
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+    
+    # AI 요약 호출 관련 예외처리
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="AI 요약 요청 시간이 초과되었습니다.")
+
+    except httpx.HTTPStatusError:
+        raise HTTPException(status_code=502, detail="AI 모델 서버 응답에 실패했습니다.")
+
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="AI 모델 서버에 연결할 수 없습니다.")
+
 
 
 # AI 요약 조회 - 게시글 상세 조회보다 아래에 두기(경로 설정)
@@ -239,11 +255,13 @@ async def request_ai_summary(title: str, content: str) -> str:
 async def summarize_post(post_id: int, db: Session = Depends(get_db)):
     post = db.query(Post).filter(Post.id == post_id).first()
 
+    # 예외처리
     if post is None:
-        return {"message": "게시글을 찾을 수 없습니다."}
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
     
+    # 예외처리
     if post.summary is None:
-        return {"summary": "아직 생성된 요약문이 없습니다."}
+        raise HTTPException(status_code=404, detail="아직 생성된 요약문이 없습니다.")
     
     return {"summary": f"게시글의 요약된 내용: {post.summary}"}
 
