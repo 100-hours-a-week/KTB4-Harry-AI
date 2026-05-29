@@ -908,3 +908,131 @@ app.include_router(posts_router)
 
 </details>
 
+---
+
+<details>
+<summary>[2-2 확장] AI 요약 스트리밍 응답 구현</summary>
+
+## 1. 진행 상황
+
+1. 기존 AI 요약 응답 흐름 확인 ✅
+2. 스트리밍 전용 엔드포인트 설계 ✅
+3. Ollama 스트리밍 응답 형식 학습 ✅
+4. `httpx.AsyncClient.stream()` 사용 방식 학습 ✅
+5. FastAPI `StreamingResponse` 연결 ✅
+6. `curl -N`으로 스트리밍 응답 테스트 ✅
+7. 생성된 요약문 DB 저장 방식은 추후 개선 사항으로 보류
+
+## 2. 구현 목표
+
+기존 AI 요약 API는 Ollama가 요약문을 모두 생성할 때까지 기다린 뒤, 완성된 결과를 한 번에 반환하는 방식이다.
+
+이번 확장에서는 LLM이 응답을 생성하는 동안 결과 조각을 클라이언트에 바로 전달하는 스트리밍 응답을 구현하는 것을 목표로 한다.
+
+이를 통해 응답 시간이 긴 AI 모델을 사용할 때도 사용자가 빈 화면에서 기다리는 것이 아니라, 생성되는 내용을 실시간으로 확인할 수 있는 구조를 경험해본다.
+
+기존 `POST /posts/{post_id}/summary` API는 유지하고, 스트리밍 학습을 위해 별도의 엔드포인트를 추가하는 방향으로 진행한다.
+
+## 3. 일반 응답과 스트리밍 응답 차이
+
+기존 일반 요약 API는 Ollama가 응답을 모두 생성한 뒤 완성된 JSON을 한 번에 반환한다.
+
+```python
+result["choices"][0]["message"]["content"]
+```
+
+이 구조에서 `message.content`는 완성된 assistant 메시지의 전체 본문을 의미한다.
+
+반면 스트리밍 응답은 완성된 답변 전체가 아니라, 생성 중인 응답 조각이 여러 번 나누어 전달된다.
+
+```python
+data["choices"][0]["delta"].get("content")
+```
+
+스트리밍 응답에서 `delta.content`는 이번에 새로 생성된 텍스트 조각을 의미한다.  
+따라서 일반 응답은 `return`으로 완성된 문자열을 반환하고, 스트리밍 응답은 `yield`로 조각을 하나씩 전달한다.
+
+## 4. FastAPI `StreamingResponse` 사용 흐름
+
+스트리밍 응답을 위해 기존 요약 API를 수정하지 않고, 별도의 엔드포인트를 추가했다.
+
+```text
+POST /posts/{post_id}/summary/stream
+```
+
+이 API는 게시글을 조회한 뒤, `stream_ai_summary()` 함수가 생성하는 응답 조각을 `StreamingResponse`로 감싸 클라이언트에 전달한다.
+
+```python
+return StreamingResponse(
+    stream_ai_summary(post.title, post.content),
+    media_type="text/event-stream"
+)
+```
+
+FastAPI 서버는 직접 화면에 텍스트를 보여주는 것이 아니라, 응답 조각을 HTTP 응답으로 계속 보내는 역할을 한다.  
+실제로 화면에 실시간으로 보여주는 역할은 `curl -N`이나 이후 프론트엔드의 JavaScript가 담당한다.
+
+## 5. Ollama 스트리밍 응답 처리 방식
+
+Ollama의 OpenAI 호환 API에서 `"stream": True`로 요청하면 응답이 다음과 같은 형태의 JSON 문자열 조각으로 전달된다.
+
+```text
+data: {"id":"chatcmpl-882","object":"chat.completion.chunk","choices":[{"delta":{"content":"..."}}]}
+```
+
+이 한 줄은 최종 답변 전체가 아니라, 스트리밍 응답 한 조각을 담은 JSON 문자열이다.
+
+따라서 그대로 클라이언트에 보내면 메타데이터까지 모두 출력된다.  
+요약문 본문만 보여주기 위해 다음 순서로 처리했다.
+
+1. `data: ` 접두어 제거
+2. JSON 문자열을 Python 딕셔너리로 변환 (json.loads())
+3. `choices[0].delta.content` 값 추출
+4. 추출한 텍스트 조각만 `yield`
+
+여기서 `chunk`라는 변수명은 스트리밍으로 전달되는 텍스트 조각을 의미한다.
+
+## 6. 테스트 방법
+
+FastAPI 문서 화면에서도 API 호출은 가능하지만, 스트리밍 응답이 실시간으로 출력되는지 확인하기에는 터미널의 `curl`이 더 적합했다.
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/posts/4/summary/stream
+```
+
+`-N` 옵션은 응답을 모아서 한 번에 출력하지 않고, 서버가 보내는 대로 바로 출력하도록 하는 옵션이다.
+
+테스트 결과, 처음에는 Ollama가 보내는 원본 JSON 조각이 그대로 출력되었다.  
+이후 JSON에서 `content` 값만 추출하도록 수정해 실제 요약문만 스트리밍으로 출력되도록 개선했다.
+
+## 7. 새로 배운 점
+
+- `"stream": True`를 사용하면 LLM 응답을 한 번에 받지 않고 조각 단위로 받을 수 있다.
+- `httpx.AsyncClient.stream()`은 HTTP 응답을 열어둔 상태에서 데이터를 조금씩 읽을 때 사용한다.
+- `yield`는 값을 하나 반환하고 함수를 끝내는 것이 아니라, 다음 값이 올 때까지 함수 실행 상태를 잠시 멈춘다.
+- `StreamingResponse`는 generator 또는 async generator가 만들어내는 값을 클라이언트에 계속 전달하는 FastAPI 응답 객체다.
+- 일반 응답에서는 `message.content`를 사용하고, 스트리밍 응답에서는 `delta.content`를 사용한다.
+- `chunk`는 스트리밍으로 전달되는 작은 데이터 조각을 표현할 때 자주 쓰는 변수명이다.
+- 요약 API는 AI 기능이지만 중심 리소스가 게시글이므로, 현재 단계에서는 `posts.py`에 두는 것이 자연스럽다고 판단했다.
+- 현재 스트리밍 응답은 실시간 출력에 집중했으며, 생성된 요약문을 DB에 저장하는 처리는 추후 개선 사항으로 남겼다.
+</details>
+
+
+<details>
+<summary>[2-5] 프론트엔드 화면 구현</summary>
+
+## 1. 진행 상황
+
+## 2. 구현 목표
+
+## 3. 화면 구성 설계
+
+## 4. API 연동 흐름
+
+## 5. 스트리밍 응답 표시 방식
+
+## 6. 테스트 방법
+
+## 7. 새로 배운 점
+
+</details>

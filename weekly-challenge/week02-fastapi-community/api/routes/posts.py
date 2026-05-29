@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 from database.session import get_db
 from models.post import Post
 from schemas.post import PostBase, SummaryResponse
-from services.ai_summary_service import request_ai_summary
+from services.ai_summary_service import request_ai_summary, stream_ai_summary
+from fastapi.responses import StreamingResponse
 
 router = APIRouter()
 
@@ -125,7 +126,7 @@ def delete_post(post_id: int, db: Session = Depends(get_db)) -> dict:
 # ------------ AI 요약 기능 연결 ------------
 
 
-# AI 요약 생성 요청 및 요약문 반환 - 게시글 상세 조회보다 아래에 두기(경로 설정)
+# AI 요약 생성 요청 및 요약문 반환
 @router.post("/posts/{post_id}/summary", response_model=SummaryResponse)
 async def generate_summary(post_id: int, db: Session = Depends(get_db)):
     post = db.query(Post).filter(Post.id == post_id).first()
@@ -145,7 +146,7 @@ async def generate_summary(post_id: int, db: Session = Depends(get_db)):
     return {"summary": post.summary}
 
 
-# AI 요약 조회 - 게시글 상세 조회보다 아래에 두기(경로 설정)
+# AI 요약 조회
 @router.get("/posts/{post_id}/summary", response_model=SummaryResponse)
 async def summarize_post(post_id: int, db: Session = Depends(get_db)):
     post = db.query(Post).filter(Post.id == post_id).first()
@@ -159,3 +160,18 @@ async def summarize_post(post_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="아직 생성된 요약문이 없습니다.")
     
     return {"summary": f"게시글의 요약된 내용: {post.summary}"}
+
+
+# AI 요약 스트리밍 요청 및 생성문 반환
+@router.post("/posts/{post_id}/summary/stream")
+async def generate_stream_summary(post_id: int, db: Session = Depends(get_db)):
+    post = db.query(Post).filter(Post.id == post_id).first()
+
+    # 예외처리
+    if post is None:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
+    
+    return StreamingResponse(
+        stream_ai_summary(post.title, post.content),
+        media_type="text/event-stream"
+    )
