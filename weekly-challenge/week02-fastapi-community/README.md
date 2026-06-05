@@ -35,6 +35,7 @@ FastAPI로 구현한 커뮤니티 게시글 API 학습 프로젝트입니다.
 - SQLite
 - httpx
 - Ollama
+- Streamlit
 - uv
 
 ---
@@ -58,6 +59,7 @@ week02-fastapi-community/
 │       └── posts.py
 ├── services/
 │   └── ai_summary_service.py
+├── streamlit_app.py
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
@@ -74,16 +76,28 @@ week02-fastapi-community/
 uv sync
 ```
 
-서버 실행:
+FastAPI 서버 실행:
 
 ```bash
-uv run uvicorn main:app --reload
+uv run uvicorn main:app --reload --port 8001
+```
+
+새 터미널에서 Streamlit 실행:
+
+```bash
+uv run streamlit run streamlit_app.py
 ```
 
 API 문서 접속:
 
 ```text
-http://127.0.0.1:8000/docs
+http://127.0.0.1:8001/docs
+```
+
+Streamlit 화면 접속:
+
+```text
+http://localhost:8501
 ```
 
 AI 요약 기능을 사용하려면 로컬에서 Ollama 서버와 사용할 모델이 준비되어 있어야 합니다.
@@ -106,6 +120,7 @@ ollama pull gemma4:e2b
 | DELETE | `/posts/{post_id}` | 게시글 삭제 |
 | POST | `/posts/{post_id}/summary` | AI 요약 생성 |
 | GET | `/posts/{post_id}/summary` | AI 요약 조회 |
+| POST | `/posts/{post_id}/summary/stream` | AI 요약 스트리밍 생성 |
 
 ---
 
@@ -118,6 +133,8 @@ ollama pull gemma4:e2b
 4. SQLite + SQLAlchemy 데이터베이스 적용
 5. HTTPException 기반 예외 처리
 6. 역할별 디렉토리 구조 분리
+7. AI 요약 스트리밍 응답 구현
+8. Streamlit 기반 프론트엔드 화면 구현
 ```
 
 ---
@@ -126,7 +143,7 @@ ollama pull gemma4:e2b
 
 - 댓글, 좋아요 기능 추가
 - 사용자 로그인 및 인증 기능 추가
-- AI 요약 스트리밍 응답 구현
+- 스트리밍으로 생성한 AI 요약문 DB 저장
 - 요청/응답 스키마 세분화
 - 테스트 코드 추가
 - 프론트엔드 화면 구현
@@ -997,7 +1014,7 @@ data: {"id":"chatcmpl-882","object":"chat.completion.chunk","choices":[{"delta":
 FastAPI 문서 화면에서도 API 호출은 가능하지만, 스트리밍 응답이 실시간으로 출력되는지 확인하기에는 터미널의 `curl`이 더 적합했다.
 
 ```bash
-curl -N -X POST http://127.0.0.1:8000/posts/4/summary/stream
+curl -N -X POST http://127.0.0.1:8001/posts/4/summary/stream
 ```
 
 `-N` 옵션은 응답을 모아서 한 번에 출력하지 않고, 서버가 보내는 대로 바로 출력하도록 하는 옵션이다.
@@ -1023,16 +1040,75 @@ curl -N -X POST http://127.0.0.1:8000/posts/4/summary/stream
 
 ## 1. 진행 상황
 
+1. Streamlit 의존성 추가 ✅
+2. 게시글 목록 및 상세 조회 화면 구현 ✅
+3. 새 게시글 작성 화면 구현 ✅
+4. AI 요약 스트리밍 API 연결 ✅
+5. 브라우저에서 실시간 요약 출력 확인 ✅
+6. 게시글 수정 및 삭제 기능 연결 ✅
+7. 삭제 전 확인 경고 추가 ✅
+8. 상세 화면 레이아웃 개선 ✅
+
 ## 2. 구현 목표
+
+FastAPI 문서 화면과 `curl`로 확인했던 API 기능을 사용자가 직접 조작할 수 있는 화면으로 연결한다.
+
+프론트엔드 문법을 깊게 학습하기보다, 백엔드 API가 실제 사용자 흐름에서 어떻게 사용되는지 경험하는 데 초점을 두었다.
 
 ## 3. 화면 구성 설계
 
+화면은 게시글 탐색과 작성을 빠르게 오갈 수 있도록 두 개의 탭으로 나누었다.
+
+- 게시글 살펴보기
+  - 전체 게시글 수와 요약 생성 상태 확인
+  - 게시글 선택 및 상세 내용 조회
+  - 스트리밍 방식으로 AI 요약 생성
+  - 게시글 수정
+  - 삭제 전 확인 절차를 거친 게시글 삭제
+- 새 게시글 작성
+  - 제목과 본문 입력
+  - FastAPI 게시글 생성 API 호출
+
 ## 4. API 연동 흐름
+
+Streamlit은 FastAPI 서버와 별도의 프로세스로 실행된다.
+
+```text
+사용자
+→ Streamlit 화면
+→ FastAPI API 요청
+→ SQLite 조회 또는 Ollama 요청
+→ Streamlit 화면에 결과 표시
+```
+
+FastAPI 서버는 `8001`번 포트, Streamlit 화면은 기본값인 `8501`번 포트를 사용한다.
 
 ## 5. 스트리밍 응답 표시 방식
 
+Streamlit의 `st.write_stream()`에 FastAPI 스트리밍 응답을 읽는 generator를 전달했다.
+
+```python
+st.write_stream(stream_summary(post["id"]))
+```
+
+generator가 텍스트 조각을 하나씩 전달하면 Streamlit 화면에도 요약문이 실시간으로 이어서 표시된다.
+
 ## 6. 테스트 방법
 
+두 개의 터미널에서 FastAPI와 Streamlit을 각각 실행했다.
+
+```bash
+uv run uvicorn main:app --reload --port 8001
+uv run streamlit run streamlit_app.py
+```
+
+이후 `http://localhost:8501`에서 게시글 목록 조회와 스트리밍 요약 출력을 확인했다.
+
 ## 7. 새로 배운 점
+
+- Streamlit은 Python 코드만으로 입력 폼, 탭, 버튼과 같은 기본 UI를 빠르게 구성할 수 있다.
+- Streamlit과 FastAPI는 하나의 서버가 아니라, 서로 다른 포트에서 실행되는 별도의 애플리케이션이다.
+- `st.write_stream()`은 generator가 전달하는 문자열 조각을 화면에 이어서 표시한다.
+- 프론트엔드를 연결하면 백엔드 기능이 실제 사용자 흐름에서 어떻게 사용되는지 더 구체적으로 확인할 수 있다.
 
 </details>
